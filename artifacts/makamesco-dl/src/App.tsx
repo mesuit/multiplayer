@@ -137,6 +137,21 @@ async function bk9Download(platform: string, url: string): Promise<DownloadResul
           return { title: 'Facebook Video', thumbnail: '', videoUrl, audioUrl: null };
         }
         const b = o(raw);
+        // fb3 returns a formats array (same shape as YouTube)
+        if (Array.isArray(b.formats)) {
+          const formats = safeArr(b.formats).map(o);
+          const videoFmt = formats.find(f => f.has_video && f.has_audio) ?? formats.find(f => f.has_video);
+          const audioFmt = formats.find(f => !f.has_video && f.has_audio);
+          const videoUrl = safeStr(videoFmt?.url) || null;
+          const audioUrl = safeStr(audioFmt?.url) || null;
+          if (!videoUrl && !audioUrl) continue;
+          return {
+            title: safeStr(b.title) || 'Facebook Video',
+            thumbnail: safeStr(b.thumbnail) || safeStr(b.thumb),
+            videoUrl,
+            audioUrl,
+          };
+        }
         const videoUrl = safeStr(b.hd) || safeStr(b.sd) || safeStr(b.BK9) || safeStr(b.url) || null;
         if (!videoUrl) continue;
         return {
@@ -235,10 +250,11 @@ interface SearchResult {
 }
 
 async function searchYouTube(query: string): Promise<SearchResult[]> {
+  // Calls our backend proxy to avoid CORS issues on the search API
   try {
     const res = await axios.get(
-      `https://my-rest-apis-six.vercel.app/yts?query=${encodeURIComponent(query)}`,
-      { timeout: 14000 }
+      `/api/ytsearch?query=${encodeURIComponent(query)}`,
+      { timeout: 16000 }
     );
     const raw = res.data;
     if (!raw) return [];
