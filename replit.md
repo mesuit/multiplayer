@@ -1,27 +1,36 @@
-# Workspace
+# MAKAMESCO DL
 
-## Overview
+A social media downloader web app built with React + Vite + Tailwind CSS. Allows users to download videos and audio from TikTok, YouTube, Instagram, Facebook, and X/Twitter, as well as search for music on YouTube.
 
-pnpm workspace monorepo using TypeScript. Each package manages its own dependencies.
+## Architecture
 
-## Stack
+- **Frontend only** — no backend server required
+- All API calls go directly to third-party external APIs (apiskeith.top, api-rebix.zone.id, etc.)
+- Multi-API rotation logic for reliability (tries multiple endpoints if one fails)
 
-- **Monorepo tool**: pnpm workspaces
-- **Node.js version**: 24
-- **Package manager**: pnpm
-- **TypeScript version**: 5.9
-- **API framework**: Express 5
-- **Database**: PostgreSQL + Drizzle ORM
-- **Validation**: Zod (`zod/v4`), `drizzle-zod`
-- **API codegen**: Orval (from OpenAPI spec)
-- **Build**: esbuild (CJS bundle)
+## Artifacts
 
-## Key Commands
+- `artifacts/makamesco-dl/` — Main web app (`@workspace/makamesco-dl`)
+  - Preview path: `/`
+  - React + Vite + Tailwind CSS v4
 
-- `pnpm run typecheck` — full typecheck across all packages
-- `pnpm run build` — typecheck + build all packages
-- `pnpm --filter @workspace/api-spec run codegen` — regenerate API hooks and Zod schemas from OpenAPI spec
-- `pnpm --filter @workspace/db run push` — push DB schema changes (dev only)
-- `pnpm --filter @workspace/api-server run dev` — run API server locally
+## Key Files
 
-See the `pnpm-workspace` skill for workspace structure, TypeScript setup, and package details.
+- `artifacts/makamesco-dl/src/App.tsx` — Main app component with all logic and UI
+- `artifacts/makamesco-dl/src/index.css` — Tailwind CSS base styles
+- `artifacts/makamesco-dl/index.html` — HTML entry with page title and Inter font
+
+## Features
+
+- Platform selection grid (TikTok, YouTube, Instagram, Facebook, X/Twitter)
+- Music Search via YouTube Search API
+- Multi-API rotation for reliable downloads
+- Download HD Video + MP3 Audio links for found media
+- Dark theme with cyan/blue gradient accents
+
+## Visual Identity
+
+- Background: `#05070a` (near black)
+- Accent: cyan-400 to blue-500 gradient
+- Typography: Inter, bold uppercase tracking
+- Rounded cards with gradient backgrounds per platform

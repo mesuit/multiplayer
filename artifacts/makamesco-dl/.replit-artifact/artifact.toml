@@ -1,0 +1,31 @@
+kind = "web"
+previewPath = "/"
+title = "MAKAMESCO DL"
+version = "1.0.0"
+id = "artifacts/makamesco-dl"
+router = "path"
+
+[[integratedSkills]]
+name = "react-vite"
+version = "1.0.0"
+
+[[services]]
+name = "web"
+paths = [ "/" ]
+localPort = 21729
+
+[services.development]
+run = "pnpm --filter @workspace/makamesco-dl run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/makamesco-dl", "run", "build" ]
+publicDir = "artifacts/makamesco-dl/dist/public"
+serve = "static"
+
+[[services.production.rewrites]]
+from = "/*"
+to = "/index.html"
+
+[services.env]
+PORT = "21729"
+BASE_PATH = "/"
