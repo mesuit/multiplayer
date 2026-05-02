@@ -10,6 +10,24 @@ function o(v: unknown): Record<string, unknown> {
   return v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : {};
 }
 
+/** Race an array of async factories — resolve with the first non-null value. */
+function raceFirst<T>(fns: Array<() => Promise<T | null>>): Promise<T | null> {
+  return new Promise(resolve => {
+    if (fns.length === 0) { resolve(null); return; }
+    let pending = fns.length;
+    for (const fn of fns) {
+      fn()
+        .then(v => { if (v !== null) resolve(v); else if (--pending === 0) resolve(null); })
+        .catch(() => { if (--pending === 0) resolve(null); });
+    }
+  });
+}
+
+/** Build a proxied download URL so the browser saves the file instead of opening it. */
+function dlUrl(mediaUrl: string, filename: string): string {
+  return `/api/dl?url=${encodeURIComponent(mediaUrl)}&filename=${encodeURIComponent(filename)}`;
+}
+
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 interface DownloadResult {
@@ -19,15 +37,86 @@ interface DownloadResult {
   audioUrl: string | null;
 }
 
+// ─── BK9 response parser (shared) ─────────────────────────────────────────────
+
+function parseBk9(platform: string, raw: unknown): DownloadResult | null {
+  if (platform === 'youtube' || platform === 'ytaudio') {
+    if (Array.isArray(raw)) return null;
+    const b = o(raw);
+    if (platform === 'ytaudio') {
+      const audioUrl = safeStr(b.BK9) || safeStr(b.url) || safeStr(b.mp3) || null;
+      if (!audioUrl) return null;
+      return { title: safeStr(b.title) || 'Audio', thumbnail: safeStr(b.thumbnail), videoUrl: null, audioUrl };
+    }
+    const formats = safeArr(b.formats).map(o);
+    const videoFmt = formats.find(f => f.has_video && f.has_audio) ?? formats.find(f => f.has_video);
+    const audioFmt = formats.find(f => !f.has_video && f.has_audio);
+    const videoUrl = safeStr(videoFmt?.url) || null;
+    const audioUrl = safeStr(audioFmt?.url) || null;
+    if (!videoUrl && !audioUrl) return null;
+    return { title: safeStr(b.title) || 'YouTube Video', thumbnail: safeStr(b.thumbnail), videoUrl, audioUrl };
+  }
+
+  if (platform === 'tiktok') {
+    if (Array.isArray(raw)) return null;
+    const b = o(raw);
+    const videoUrl = safeStr(b.BK9) || safeStr(b.url) || null;
+    if (!videoUrl) return null;
+    return {
+      title: safeStr(b.desc) || safeStr(o(b.music_info).title) || 'TikTok Video',
+      thumbnail: safeStr(b.thumb) || safeStr(b.thumbnail),
+      videoUrl, audioUrl: null,
+    };
+  }
+
+  if (platform === 'twitter') {
+    if (Array.isArray(raw)) return null;
+    const b = o(raw);
+    const videoUrl = safeStr(b.HD) || safeStr(b.SD) || safeStr(b.url) || safeStr(b.BK9) || null;
+    if (!videoUrl) return null;
+    return { title: safeStr(b.caption) || safeStr(b.desc) || 'X / Twitter Video', thumbnail: safeStr(b.thumbnail) || safeStr(b.thumb), videoUrl, audioUrl: null };
+  }
+
+  if (platform === 'instagram') {
+    if (Array.isArray(raw)) {
+      const items = raw.map(o);
+      const videoItem = items.find(it => it.type === 'unknown' || it.type === 'video');
+      const videoUrl = safeStr(videoItem?.url) || safeStr(items[0]?.url) || null;
+      if (!videoUrl) return null;
+      return { title: 'Instagram Video', thumbnail: '', videoUrl, audioUrl: null };
+    }
+    const b = o(raw);
+    const videoUrl = safeStr(b.url) || safeStr(b.BK9) || safeStr(b.video) || null;
+    if (!videoUrl) return null;
+    return { title: safeStr(b.title) || 'Instagram Video', thumbnail: safeStr(b.thumbnail), videoUrl, audioUrl: null };
+  }
+
+  if (platform === 'facebook') {
+    if (Array.isArray(raw)) {
+      const items = raw.map(o);
+      const videoUrl = safeStr(items.find(it => it.type === 'unknown' || it.type === 'video')?.url) || safeStr(items[0]?.url) || null;
+      if (!videoUrl) return null;
+      return { title: 'Facebook Video', thumbnail: '', videoUrl, audioUrl: null };
+    }
+    const b = o(raw);
+    if (Array.isArray(b.formats)) {
+      const formats = safeArr(b.formats).map(o);
+      const videoFmt = formats.find(f => f.has_video && f.has_audio) ?? formats.find(f => f.has_video);
+      const audioFmt = formats.find(f => !f.has_video && f.has_audio);
+      const videoUrl = safeStr(videoFmt?.url) || null;
+      const audioUrl = safeStr(audioFmt?.url) || null;
+      if (!videoUrl && !audioUrl) return null;
+      return { title: safeStr(b.title) || 'Facebook Video', thumbnail: safeStr(b.thumbnail) || safeStr(b.thumb), videoUrl, audioUrl };
+    }
+    const videoUrl = safeStr(b.hd) || safeStr(b.sd) || safeStr(b.BK9) || safeStr(b.url) || null;
+    if (!videoUrl) return null;
+    return { title: safeStr(b.title) || 'Facebook Video', thumbnail: safeStr(b.thumbnail) || safeStr(b.thumb), videoUrl, audioUrl: null };
+  }
+
+  return null;
+}
+
 // ─── BK9 API (primary) ────────────────────────────────────────────────────────
-// Base: https://api.bk9.dev  Prefix: /download/
-// Response: { status: true, owner: "@BK9dev", BK9: <platform-specific> }
-//
-// TikTok:   BK9 = { BK9: videoUrl, desc, thumb, music_info: { title } }
-// YouTube:  BK9 = { title, thumbnail, formats: [{quality, url, has_audio, has_video}] }
-// Twitter:  BK9 = { HD: videoUrl, caption, thumbnail }
-// Instagram:BK9 = [ { type:"unknown"|"image", url } ]  (array)
-// Facebook: BK9 = { hd, sd, title, thumbnail } or { BK9: url } or similar
 
 async function bk9Download(platform: string, url: string): Promise<DownloadResult | null> {
   const endpointMap: Record<string, string[]> = {
@@ -35,150 +124,37 @@ async function bk9Download(platform: string, url: string): Promise<DownloadResul
     youtube:   ['/download/youtube'],
     ytaudio:   ['/download/ytmp3'],
     instagram: ['/download/instagram', '/download/instagram2'],
-    facebook:  ['/download/fb', '/download/fb2', '/download/fb3'],
+    // fb3 first — most reliable for share URLs
+    facebook:  ['/download/fb3', '/download/fb', '/download/fb2'],
     twitter:   ['/download/twitter', '/download/twitter-2'],
   };
 
   const endpoints = endpointMap[platform] ?? [];
 
-  for (const ep of endpoints) {
+  // Race all endpoints in parallel — return whichever succeeds first
+  return raceFirst(endpoints.map(ep => async () => {
     try {
       const extra = platform === 'ytaudio' ? '&type=mp3' : '';
       const res = await axios.get(
         `https://api.bk9.dev${ep}?url=${encodeURIComponent(url)}${extra}`,
-        { timeout: 14000 }
+        { timeout: 10000 }
       );
       const d = o(res.data);
-      if (!d.status) continue;
-
-      const raw = d.BK9;
-
-      // ── YouTube ──
-      if (platform === 'youtube' || platform === 'ytaudio') {
-        if (Array.isArray(raw)) continue;
-        const b = o(raw);
-
-        if (platform === 'ytaudio') {
-          const audioUrl = safeStr(b.BK9) || safeStr(b.url) || safeStr(b.mp3) || null;
-          if (audioUrl) return { title: safeStr(b.title) || 'Audio', thumbnail: safeStr(b.thumbnail), videoUrl: null, audioUrl };
-          continue;
-        }
-
-        const formats = safeArr(b.formats).map(o);
-        const videoFmt = formats.find(f => f.has_video && f.has_audio) ?? formats.find(f => f.has_video);
-        const audioFmt = formats.find(f => !f.has_video && f.has_audio);
-        const videoUrl = safeStr(videoFmt?.url) || null;
-        const audioUrl = safeStr(audioFmt?.url) || null;
-        if (!videoUrl && !audioUrl) continue;
-        return {
-          title: safeStr(b.title) || 'YouTube Video',
-          thumbnail: safeStr(b.thumbnail),
-          videoUrl,
-          audioUrl,
-        };
-      }
-
-      // ── TikTok ──
-      if (platform === 'tiktok') {
-        if (Array.isArray(raw)) continue;
-        const b = o(raw);
-        const videoUrl = safeStr(b.BK9) || safeStr(b.url) || null;
-        if (!videoUrl) continue;
-        return {
-          title: safeStr(b.desc) || safeStr(o(b.music_info).title) || 'TikTok Video',
-          thumbnail: safeStr(b.thumb) || safeStr(b.thumbnail),
-          videoUrl,
-          audioUrl: null,
-        };
-      }
-
-      // ── Twitter ──
-      if (platform === 'twitter') {
-        if (Array.isArray(raw)) continue;
-        const b = o(raw);
-        const videoUrl = safeStr(b.HD) || safeStr(b.SD) || safeStr(b.url) || safeStr(b.BK9) || null;
-        if (!videoUrl) continue;
-        return {
-          title: safeStr(b.caption) || safeStr(b.desc) || 'X / Twitter Video',
-          thumbnail: safeStr(b.thumbnail) || safeStr(b.thumb),
-          videoUrl,
-          audioUrl: null,
-        };
-      }
-
-      // ── Instagram ──  BK9 is an array of {type, url}
-      if (platform === 'instagram') {
-        if (Array.isArray(raw)) {
-          const items = raw.map(o);
-          const videoItem = items.find(it => it.type === 'unknown' || it.type === 'video');
-          const videoUrl = safeStr(videoItem?.url) || null;
-          if (!videoUrl) {
-            // might be image only; show first item's url
-            const firstUrl = safeStr(items[0]?.url) || null;
-            if (firstUrl) return { title: 'Instagram Media', thumbnail: '', videoUrl: firstUrl, audioUrl: null };
-            continue;
-          }
-          return { title: 'Instagram Video', thumbnail: '', videoUrl, audioUrl: null };
-        }
-        // non-array fallback
-        const b = o(raw);
-        const videoUrl = safeStr(b.url) || safeStr(b.BK9) || safeStr(b.video) || null;
-        if (!videoUrl) continue;
-        return { title: safeStr(b.title) || 'Instagram Video', thumbnail: safeStr(b.thumbnail), videoUrl, audioUrl: null };
-      }
-
-      // ── Facebook ──
-      if (platform === 'facebook') {
-        if (Array.isArray(raw)) {
-          const items = raw.map(o);
-          const videoItem = items.find(it => it.type === 'unknown' || it.type === 'video');
-          const videoUrl = safeStr(videoItem?.url) || safeStr(items[0]?.url) || null;
-          if (!videoUrl) continue;
-          return { title: 'Facebook Video', thumbnail: '', videoUrl, audioUrl: null };
-        }
-        const b = o(raw);
-        // fb3 returns a formats array (same shape as YouTube)
-        if (Array.isArray(b.formats)) {
-          const formats = safeArr(b.formats).map(o);
-          const videoFmt = formats.find(f => f.has_video && f.has_audio) ?? formats.find(f => f.has_video);
-          const audioFmt = formats.find(f => !f.has_video && f.has_audio);
-          const videoUrl = safeStr(videoFmt?.url) || null;
-          const audioUrl = safeStr(audioFmt?.url) || null;
-          if (!videoUrl && !audioUrl) continue;
-          return {
-            title: safeStr(b.title) || 'Facebook Video',
-            thumbnail: safeStr(b.thumbnail) || safeStr(b.thumb),
-            videoUrl,
-            audioUrl,
-          };
-        }
-        const videoUrl = safeStr(b.hd) || safeStr(b.sd) || safeStr(b.BK9) || safeStr(b.url) || null;
-        if (!videoUrl) continue;
-        return {
-          title: safeStr(b.title) || 'Facebook Video',
-          thumbnail: safeStr(b.thumbnail) || safeStr(b.thumb),
-          videoUrl,
-          audioUrl: null,
-        };
-      }
-
+      if (!d.status) return null;
+      return parseBk9(platform, d.BK9);
     } catch {
-      // Try next endpoint
+      return null;
     }
-  }
-  return null;
+  }));
 }
 
 // ─── KeithAPI (fallback for Twitter only) ─────────────────────────────────────
-// https://apiskeith.top/download/twitter
-// Response: { status: true, result: { desc, thumb, video_sd, video_hd, audio } }
 
-async function keithDownload(platform: string, url: string): Promise<DownloadResult | null> {
-  if (platform !== 'twitter') return null;
+async function keithDownload(_platform: string, url: string): Promise<DownloadResult | null> {
   try {
     const res = await axios.get(
       `https://apiskeith.top/download/twitter?url=${encodeURIComponent(url)}`,
-      { timeout: 12000 }
+      { timeout: 10000 }
     );
     const d = o(res.data);
     if (!d.status) return null;
@@ -186,60 +162,50 @@ async function keithDownload(platform: string, url: string): Promise<DownloadRes
     const videoUrl = safeStr(r.video_hd) || safeStr(r.video_sd) || null;
     const audioUrl = safeStr(r.audio) || null;
     if (!videoUrl && !audioUrl) return null;
-    return {
-      title: safeStr(r.desc) || 'X / Twitter Video',
-      thumbnail: safeStr(r.thumb) || safeStr(r.thumbnail),
-      videoUrl,
-      audioUrl,
-    };
+    return { title: safeStr(r.desc) || 'X / Twitter Video', thumbnail: safeStr(r.thumb) || safeStr(r.thumbnail), videoUrl, audioUrl };
   } catch {
     return null;
   }
 }
 
 // ─── XWolf API (fallback for TikTok only) ────────────────────────────────────
-// https://apis.xwolf.space/api/downloader/tiktok
-// Response: { success: true, videoUrl, videoUrlNoWatermark, title }
 
-async function xwolfDownload(platform: string, url: string): Promise<DownloadResult | null> {
-  if (platform !== 'tiktok') return null;
+async function xwolfDownload(_platform: string, url: string): Promise<DownloadResult | null> {
   try {
     const res = await axios.get(
       `https://apis.xwolf.space/api/downloader/tiktok?url=${encodeURIComponent(url)}`,
-      { timeout: 12000 }
+      { timeout: 10000 }
     );
     const d = o(res.data);
     if (!d.success) return null;
     const videoUrl = safeStr(d.videoUrlNoWatermark) || safeStr(d.videoUrl) || null;
     if (!videoUrl) return null;
-    return {
-      title: safeStr(d.title) || 'TikTok Video',
-      thumbnail: safeStr(d.thumbnail) || safeStr(d.cover) || '',
-      videoUrl,
-      audioUrl: null,
-    };
+    return { title: safeStr(d.title) || 'TikTok Video', thumbnail: safeStr(d.thumbnail) || safeStr(d.cover) || '', videoUrl, audioUrl: null };
   } catch {
     return null;
   }
 }
 
 // ─── Main download orchestrator ───────────────────────────────────────────────
+// Twitter + TikTok: race primary & fallback simultaneously for speed
 
 async function fetchDownload(platform: string, url: string): Promise<DownloadResult | null> {
-  // bk9 is primary for everything
-  const result = await bk9Download(platform, url);
-  if (result) return result;
-
-  // Platform-specific fallbacks
-  if (platform === 'twitter') return keithDownload(platform, url);
-  if (platform === 'tiktok')  return xwolfDownload(platform, url);
-
-  return null;
+  if (platform === 'twitter') {
+    return raceFirst([
+      () => bk9Download(platform, url),
+      () => keithDownload(platform, url),
+    ]);
+  }
+  if (platform === 'tiktok') {
+    return raceFirst([
+      () => bk9Download(platform, url),
+      () => xwolfDownload(platform, url),
+    ]);
+  }
+  return bk9Download(platform, url);
 }
 
 // ─── YouTube Search ───────────────────────────────────────────────────────────
-// Confirmed working: https://my-rest-apis-six.vercel.app/yts?query=...
-// Returns: { status: "success", results: [{title, url, duration, views, thumbnail, author}] }
 
 interface SearchResult {
   title: string;
@@ -250,7 +216,6 @@ interface SearchResult {
 }
 
 async function searchYouTube(query: string): Promise<SearchResult[]> {
-  // Calls our backend proxy to avoid CORS issues on the search API
   try {
     const res = await axios.get(
       `/api/ytsearch?query=${encodeURIComponent(query)}`,
@@ -564,6 +529,21 @@ export default function App() {
 
 function ResultCard({ result, compact = false }: { result: DownloadResult; compact?: boolean }) {
   const hasLinks = result.videoUrl || result.audioUrl;
+
+  function ext(url: string, type: 'video' | 'audio') {
+    if (type === 'audio') return 'mp3';
+    if (url.includes('.mp4')) return 'mp4';
+    if (url.includes('.webm')) return 'webm';
+    return 'mp4';
+  }
+
+  function filename(type: 'video' | 'audio', url: string) {
+    const base = result.title
+      ? result.title.replace(/[^a-zA-Z0-9 _-]/g, '').trim().slice(0, 60) || 'download'
+      : 'download';
+    return `${base}.${ext(url, type)}`;
+  }
+
   return (
     <div className={`${compact ? 'mt-2' : 'mt-8'} bg-[#161d2f] rounded-3xl overflow-hidden border border-slate-700 shadow-2xl`}>
       {!compact && result.thumbnail && (
@@ -582,9 +562,8 @@ function ResultCard({ result, compact = false }: { result: DownloadResult; compa
           <div className="flex flex-col gap-2">
             {result.videoUrl && (
               <a
-                href={result.videoUrl}
-                target="_blank"
-                rel="noreferrer"
+                href={dlUrl(result.videoUrl, filename('video', result.videoUrl))}
+                download={filename('video', result.videoUrl)}
                 className="w-full bg-cyan-500 text-black py-4 rounded-xl text-center font-black uppercase text-xs hover:bg-cyan-400 transition-colors flex items-center justify-center gap-2"
               >
                 <Video size={14} /> Download Video
@@ -592,9 +571,8 @@ function ResultCard({ result, compact = false }: { result: DownloadResult; compa
             )}
             {result.audioUrl && (
               <a
-                href={result.audioUrl}
-                target="_blank"
-                rel="noreferrer"
+                href={dlUrl(result.audioUrl, filename('audio', result.audioUrl))}
+                download={filename('audio', result.audioUrl)}
                 className="w-full bg-slate-700 text-white py-4 rounded-xl text-center font-black uppercase text-xs hover:bg-slate-600 transition-colors flex items-center justify-center gap-2"
               >
                 <Headphones size={14} /> Download Audio
