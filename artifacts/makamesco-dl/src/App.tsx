@@ -1,5 +1,5 @@
-import { useState } from 'react';
-import { Download, Search, Music, RefreshCcw, ArrowLeft, Video, Headphones, AlertCircle } from 'lucide-react';
+import { useState, useEffect } from 'react';
+import { Download, Search, Music, RefreshCcw, ArrowLeft, Video, Headphones, AlertCircle, X } from 'lucide-react';
 import axios from 'axios';
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -267,6 +267,70 @@ const PLATFORMS: Platform[] = [
 
 type View = 'home' | 'input' | 'search';
 
+// ─── PWA Install Prompt ───────────────────────────────────────────────────────
+
+interface BeforeInstallPromptEvent extends Event {
+  prompt(): Promise<void>;
+  readonly userChoice: Promise<{ outcome: 'accepted' | 'dismissed' }>;
+}
+
+function InstallBanner() {
+  const [deferredPrompt, setDeferredPrompt] = useState<BeforeInstallPromptEvent | null>(null);
+  const [dismissed, setDismissed] = useState(false);
+
+  useEffect(() => {
+    const handler = (e: Event) => {
+      e.preventDefault();
+      setDeferredPrompt(e as BeforeInstallPromptEvent);
+    };
+    window.addEventListener('beforeinstallprompt', handler);
+    return () => window.removeEventListener('beforeinstallprompt', handler);
+  }, []);
+
+  if (!deferredPrompt || dismissed) return null;
+
+  async function install() {
+    if (!deferredPrompt) return;
+    await deferredPrompt.prompt();
+    const { outcome } = await deferredPrompt.userChoice;
+    if (outcome === 'accepted' || outcome === 'dismissed') {
+      setDeferredPrompt(null);
+      setDismissed(true);
+    }
+  }
+
+  return (
+    <div className="fixed bottom-4 left-4 right-4 z-50 max-w-md mx-auto">
+      <div className="bg-[#0f1420] border border-cyan-500/40 rounded-2xl p-4 shadow-2xl flex items-center gap-4">
+        <div className="w-10 h-10 shrink-0 rounded-xl bg-gradient-to-br from-cyan-500 to-blue-600 flex items-center justify-center text-black font-black text-lg">
+          M
+        </div>
+        <div className="flex-1 min-w-0">
+          <p className="font-black text-sm text-white uppercase tracking-wide">Install App</p>
+          <p className="text-slate-400 text-[11px] mt-0.5">Add MAKAMESCO DL to your home screen for quick access</p>
+        </div>
+        <div className="flex items-center gap-2 shrink-0">
+          <button
+            onClick={install}
+            className="bg-cyan-500 text-black font-black text-xs px-4 py-2 rounded-xl hover:bg-cyan-400 transition-colors uppercase"
+          >
+            Install
+          </button>
+          <button
+            onClick={() => setDismissed(true)}
+            className="text-slate-500 hover:text-white transition-colors"
+            aria-label="Dismiss"
+          >
+            <X size={16} />
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── App ──────────────────────────────────────────────────────────────────────
+
 export default function App() {
   const [view, setView]                 = useState<View>('home');
   const [platform, setPlatform]         = useState<Platform | null>(null);
@@ -521,6 +585,8 @@ export default function App() {
           &copy; 2026 MAKAMESCO &bull; SPICETECH &bull; KENYA
         </p>
       </footer>
+
+      <InstallBanner />
     </div>
   );
 }
